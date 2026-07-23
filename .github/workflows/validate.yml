@@ -1,0 +1,44 @@
+name: Validate agents
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Manifests parse, versions present, redaction is clean
+        run: |
+          set -euo pipefail
+          pip install --quiet pyyaml
+          for YAML in agents/*.yaml; do
+            python3 - "$YAML" << 'PY'
+          import sys, yaml
+          m = yaml.safe_load(open(sys.argv[1]))
+          assert m.get("name"), "missing name"
+          assert str(m.get("version", "")).strip(), "missing version"
+          assert m.get("definition"), "missing definition"
+          print(f"{m['name']} v{m['version']}: parses")
+          PY
+            REDACTED=$(sed -e '/server_url:/d' -e '/project_connection_id:/d' "$YAML")
+            if echo "$REDACTED" | grep -qE "server_url|project_connection_id"; then
+              echo "::error::$YAML still contains plumbing after redaction"
+              exit 1
+            fi
+          done
+      - name: Catalog parses and schema files exist
+        run: |
+          python3 - << 'PY'
+          import json, os, re
+          c = json.load(open("agents/output-contracts.json"))
+          assert re.fullmatch(r"v\d{4}\.\d{2}\.[1-9]\d*", c["version"]), f"bad catalog version {c['version']}"
+          for cid, entry in c["contracts"].items():
+              assert entry.get("agentName") and entry.get("agentVersion"), f"{cid}: missing agent identity"
+              sf = entry.get("schemaFile")
+              if sf:
+                  assert os.path.exists(os.path.join("agents", sf)), f"{cid}: missing {sf}"
+          print(f"catalog {c['version']}: OK ({', '.join(c['contracts'])})")
+          PY

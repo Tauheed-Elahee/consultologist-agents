@@ -1,0 +1,65 @@
+name: Publish agents
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AI_ENDPOINT: https://consultologist-canada-east-resou.services.ai.azure.com/api/projects/consultologist-canada-east
+  AI_API_VERSION: v1
+  REGISTRY_ACCOUNT: consultologistpublic
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: registry
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - name: Detect changed content
+        id: diff
+        run: |
+          set -euo pipefail
+          CHANGED=$(git diff --name-only HEAD^ HEAD 2>/dev/null || git show --name-only --format= HEAD)
+          echo "changed<<EOF2" >> "$GITHUB_OUTPUT"
+          echo "$CHANGED" >> "$GITHUB_OUTPUT"
+          echo "EOF2" >> "$GITHUB_OUTPUT"
+          echo "$CHANGED"
+      - name: Azure login (OIDC)
+        if: contains(steps.diff.outputs.changed, 'agents/')
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: Publish changed agent versions to Foundry + mirror
+        if: contains(steps.diff.outputs.changed, '.yaml')
+        run: |
+          set -euo pipefail
+          pip install --quiet pyyaml
+          for YAML in $(echo "${{ steps.diff.outputs.changed }}" | grep -E '^agents/[^/]+\.yaml$' || true); do
+            NAME=$(basename "$YAML" .yaml)
+            VERSION=$(python3 -c "import yaml,sys; print(yaml.safe_load(open(sys.argv[1]))['version'])" "$YAML")
+            echo "Publishing $NAME v$VERSION to Foundry…"
+            python3 -c "
+          import yaml, json, sys
+          m = yaml.safe_load(open('$YAML'))
+          print(json.dumps({'definition': m['definition']}))" > /tmp/body.json
+            CREATED=$(az rest --method POST \
+              --url "$AI_ENDPOINT/agents/$NAME/versions?api-version=$AI_API_VERSION" \
+              --resource "https://ai.azure.com" \
+              --body @/tmp/body.json --query "version" -o tsv)
+            if [ "$CREATED" != "$VERSION" ]; then
+              echo "::error::Foundry assigned version $CREATED but $YAML declares $VERSION — align the yaml before merging"
+              exit 1
+            fi
+            ./scripts/publish-agent-definition.sh "$REGISTRY_ACCOUNT" "$NAME"
+          done
+      - name: Publish catalog if changed
+        if: contains(steps.diff.outputs.changed, 'agents/output-contracts.json')
+        run: ./scripts/publish-output-contracts.sh "$REGISTRY_ACCOUNT"
