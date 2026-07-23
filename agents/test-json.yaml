@@ -6,7 +6,7 @@
 #
 # Project: consultologist-canada-east (resource consultologist-canada-east-resou)
 name: test-json
-version: "47"
+version: "48"
 status: active
 definition:
   kind: prompt
